@@ -31,9 +31,13 @@ const props = withDefaults(defineProps<{
   value: string
   editable?: boolean
   autoFocus?: boolean
+  currentUser?: string
+  userColor?: string
 }>(), {
   editable: false,
   autoFocus: false,
+  currentUser: 'anonymous',
+  userColor: '#f44336'
 })
 
 const emit = defineEmits<{
@@ -49,14 +53,100 @@ const { handleElementId, textFormatPainter, richTextAttrs } = storeToRefs(mainSt
 const editorViewRef = ref<HTMLElement>()
 let editorView: EditorView
 
+let lastRevisionTime = Date.now()
+const REVISION_MERGE_INTERVAL = 3000 // 3秒内的修改将被合并
+
+const addRevisionMark = (view: EditorView, from: number, to: number) => {
+  const { state, dispatch } = view
+  const currentTime = Date.now()
+  
+  // 检查是否需要合并修订记录
+  const shouldMerge = currentTime - lastRevisionTime < REVISION_MERGE_INTERVAL
+  
+  if (shouldMerge) {
+    // 查找前一个修订记
+    const doc = state.doc
+    const revisionMark = state.schema.marks.revision
+    let hasPreviousMark = false
+    
+    doc.nodesBetween(Math.max(0, from - 1), from, (node, pos) => {
+      if (node.marks.find(m => m.type === revisionMark && m.attrs.user === props.currentUser)) {
+        hasPreviousMark = true
+        return false
+      }
+    })
+    
+    if (hasPreviousMark) {
+      // 如果存在前一个相同用户的修订记录，直接返回
+      return
+    }
+  }
+
+  // 创建新的修订记录mark
+  const mark = state.schema.marks.revision.create({
+    user: props.currentUser,
+    time: new Date().toISOString(),
+    color: props.userColor
+  })
+
+  // 应用mark
+  dispatch(state.tr.addMark(from, to, mark))
+  lastRevisionTime = currentTime
+}
+
+// 在 onMounted 之前添加这个新的函数
+const handleTextInput = (view: EditorView, from: number, to: number, text: string) => {
+  const { state, dispatch } = view
+  
+  // 检查是否有现有的删除标记
+  let existingDeletionMarks = []
+  state.doc.nodesBetween(from, to, (node, pos) => {
+    if (node.isText) {
+      const deletionMark = node.marks.find(m => m.type.name === 'deletion')
+      if (deletionMark) {
+        existingDeletionMarks.push({
+          mark: deletionMark,
+          from: Math.max(pos, from),
+          to: Math.min(pos + node.nodeSize, to)
+        })
+      }
+    }
+  })
+  
+  // 创建文本插入的 transaction
+  let tr = state.tr.insertText(text, from, to)
+  
+  // 创建修订记录 mark
+  const revisionMark = state.schema.marks.revision.create({
+    user: props.currentUser,
+    time: new Date().toISOString(),
+    color: props.userColor
+  })
+  
+  // 为插入的文本添加 revision mark
+  tr = tr.addMark(from, from + text.length, revisionMark)
+  
+  // 重新应用删除标记
+  existingDeletionMarks.forEach(({ mark, from: markFrom, to: markTo }) => {
+    tr = tr.addMark(markFrom, markTo, mark)
+  })
+  
+  dispatch(tr)
+  return true
+}
+
 // 富文本的各种交互事件监听：
 // 聚焦时取消全局快捷键事件
 // 输入文字时同步数据到vuex
 // 点击鼠标和键盘时同步富文本状态到工具栏
 const handleInput = debounce(function(isHanldeHistory = false) {
-  if (props.value.replace(/ style=\"\"/g, '') === editorView.dom.innerHTML.replace(/ style=\"\"/g, '')) return
+  if (!editorView) return
+  
+  const newHTML = editorView.dom.innerHTML
+  if (props.value.replace(/ style=\"\"/g, '') === newHTML.replace(/ style=\"\"/g, '')) return
+
   emit('update', {
-    value: editorView.dom.innerHTML,
+    value: newHTML,
     ignore: isHanldeHistory,
   })
 }, 300, { trailing: true })
@@ -96,8 +186,47 @@ watch(textContent, () => {
   if (!editorView) return
   if (editorView.hasFocus()) return
 
-  const { doc, tr } = editorView.state
-  editorView.dispatch(tr.replaceRangeWith(0, doc.content.size, createDocument(textContent.value)))
+  const { state, dispatch } = editorView
+  
+  // 收集所有标记（包括修订和删除标记）
+  const marks = new Map()
+  state.doc.nodesBetween(0, state.doc.content.size, (node, pos) => {
+    if (node.isText) {
+      const nodeMarks = node.marks.filter(m => 
+        m.type.name === 'deletion' || m.type.name === 'revision'
+      )
+      if (nodeMarks.length) {
+        marks.set(pos, {
+          marks: nodeMarks,
+          text: node.text,
+          length: node.nodeSize
+        })
+      }
+    }
+    return true
+  })
+
+  // 创建新文档
+  const newDoc = createDocument(textContent.value)
+  let tr = state.tr.replaceWith(0, state.doc.content.size, newDoc.content)
+
+  // 重新应用所有标记
+  marks.forEach((info, pos) => {
+    const { marks: nodeMarks, text } = info
+    
+    // 在新文档中查找相同的文本
+    newDoc.nodesBetween(0, newDoc.content.size, (node, newPos) => {
+      if (node.isText && node.text === text) {
+        // 应用所有标记
+        nodeMarks.forEach(mark => {
+          tr = tr.addMark(newPos, newPos + node.nodeSize, mark)
+        })
+      }
+      return true
+    })
+  })
+
+  dispatch(tr)
 })
 
 // 打开/关闭编辑器的编辑模式
@@ -272,17 +401,116 @@ const handleMouseup = () => {
   if (!keep) mainStore.setTextFormatPainter(null)
 }
 
+// 首先添加类型定
+interface TextRange {
+  from: number
+  to: number
+}
+
+// 修改处理删除的函数
+const handleDelete = (view: EditorView, from: number, to: number) => {
+  const { state, dispatch } = view
+  const { $from, $to } = state.selection
+  
+  // 创建一个新的 transaction
+  let tr = state.tr
+
+  // 添加删除标记
+  const deletionMark = state.schema.marks.deletion.create({
+    user: props.currentUser,
+    time: new Date().toISOString(),
+    color: props.userColor,
+    deleted: true
+  })
+
+  // 为选中内容添加删除线标记
+  tr = tr.addMark($from.pos, $to.pos, deletionMark)
+  
+  // 应用更改
+  dispatch(tr)
+  
+  // 强制重新渲染
+  view.updateState(view.state)
+  return true
+}
+
 // Prosemirror编辑器的初始化和卸载
 onMounted(() => {
   editorView = initProsemirrorEditor((editorViewRef.value as Element), textContent.value, {
     handleDOMEvents: {
       focus: handleFocus,
       blur: handleBlur,
-      keydown: handleKeydown,
+      keydown: (view, event) => {
+        // 处理删除键
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+          event.preventDefault() // 阻止默认删除行为
+          
+          const { state } = view
+          const { empty, from, to } = state.selection
+          
+          if (empty) {
+            // 处理单个字符删除
+            const pos = event.key === 'Backspace' ? from - 1 : from
+            const nextPos = event.key === 'Backspace' ? from : from + 1
+            
+            if (pos >= 0 && nextPos <= state.doc.content.size) {
+              // 检查要删除的字符是否是其他用户的内容
+              let isOtherUserContent = false
+              let hasContent = false
+              
+              state.doc.nodesBetween(pos, nextPos, (node) => {
+                if (node.isText) {
+                  hasContent = true
+                  const marks = node.marks
+                  const revisionMark = marks.find(m => m.type.name === 'revision')
+                  const deletionMark = marks.find(m => m.type.name === 'deletion')
+                  
+                  // 如果已经有删除标记，或者是其他用户的内容，标记为其他用户内容
+                  if (deletionMark || !revisionMark || revisionMark.attrs.user !== props.currentUser) {
+                    isOtherUserContent = true
+                  }
+                }
+              })
+
+              if (!hasContent) return true
+
+              if (isOtherUserContent) {
+                // 如果是其他用户的内容，添加删除标记
+                const deletionMark = state.schema.marks.deletion.create({
+                  user: props.currentUser,
+                  time: new Date().toISOString(),
+                  color: props.userColor,
+                  deleted: true
+                })
+                
+                view.dispatch(state.tr.addMark(pos, nextPos, deletionMark))
+                
+                // 如果是 Backspace，将光标移到前一个位置
+                if (event.key === 'Backspace' && pos > 0) {
+                  const tr = view.state.tr.setSelection(
+                    view.state.selection.constructor.near(view.state.doc.resolve(pos))
+                  )
+                  view.dispatch(tr)
+                }
+              }
+              else {
+                // 如果是自己的内容，直接删除
+                view.dispatch(state.tr.delete(pos, nextPos))
+              }
+            }
+            return true
+          }
+          
+          // 处理选中内容的删除
+          return handleDelete(view, from, to)
+        }
+        return handleKeydown(view, event)
+      },
       click: handleClick,
       mouseup: handleMouseup,
     },
     editable: () => props.editable,
+    handleTextInput: handleTextInput,
   })
   if (props.autoFocus) editorView.focus()
 })

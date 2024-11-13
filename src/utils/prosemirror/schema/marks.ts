@@ -173,6 +173,71 @@ const mark: MarkSpec = {
   toDOM: node => ['mark', { 'data-index': node.attrs.index }, 0],
 }
 
+const revision: MarkSpec = {
+  attrs: {
+    user: { default: '' },
+    time: { default: '' },
+    color: { default: '' }
+  },
+  inclusive: true,
+  parseDOM: [{
+    tag: 'span[data-revision]',
+    getAttrs(dom) {
+      return {
+        user: dom.getAttribute('data-user'),
+        time: dom.getAttribute('data-time'),
+        color: dom.getAttribute('data-color')
+      }
+    }
+  }],
+  toDOM(mark) {
+    const style = `color: ${mark.attrs.color} !important;`
+    return ['span', {
+      'data-revision': 'true',
+      'data-user': mark.attrs.user,
+      'data-time': mark.attrs.time,
+      'data-color': mark.attrs.color,
+      style
+    }, 0]
+  }
+}
+
+const deletion: MarkSpec = {
+  attrs: {
+    user: { default: '' },
+    time: { default: '' },
+    color: { default: '' },
+    deleted: { default: false }
+  },
+  inclusive: true,
+  parseDOM: [{
+    tag: 'span[data-deletion]',
+    getAttrs(dom) {
+      return {
+        user: dom.getAttribute('data-user'),
+        time: dom.getAttribute('data-time'),
+        color: dom.getAttribute('data-color'),
+        deleted: dom.getAttribute('data-deleted') === 'true'
+      }
+    }
+  }],
+  toDOM(mark) {
+    return ['span', {
+      'data-deletion': 'true',
+      'data-user': mark.attrs.user,
+      'data-time': mark.attrs.time,
+      'data-color': mark.attrs.color,
+      'data-deleted': mark.attrs.deleted,
+      style: `
+        text-decoration: line-through !important;
+        text-decoration-color: ${mark.attrs.color} !important;
+        text-decoration-thickness: 2px !important;
+        display: inline !important;
+      `
+    }, 0]
+  }
+}
+
 const { em, strong, code } = marks
 
 export default {
@@ -189,4 +254,6 @@ export default {
   underline,
   link,
   mark,
+  revision,
+  deletion,
 }

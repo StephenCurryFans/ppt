@@ -97,3 +97,41 @@
 .ProseMirror-selectednode {
   outline: none !important;
 }
+
+// 修改修订记录的样式
+span[data-revision] {
+  position: relative;
+  
+  &:hover::after {
+    content: attr(data-user) " - " attr(data-time);
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    background: rgba(0, 0, 0, 0.8);
+    color: white !important;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 1000;
+  }
+}
+
+// 添加删除标记的样式
+span[data-deletion] {
+  position: relative;
+  
+  &:hover::after {
+    content: "删除者：" attr(data-user) " - " attr(data-time);
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    background: rgba(0, 0, 0, 0.8);
+    color: white !important;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 1000;
+  }
+}
